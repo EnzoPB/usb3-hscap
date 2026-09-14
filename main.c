@@ -1,21 +1,37 @@
-
-
 #include <arv.h>
 
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <time.h>
 
-#define NUM_BUFFERS 10
-#define NUM_FRAMES 100000
-// #define SAVE_FRAMES
-#define DISPLAY_FRAMERATE 20
+#define NUM_BUFFERS 100
+// #define NUM_FRAMES 10000000
+#define SAVE_FRAMES
+#define DISPLAY_FRAMERATE 10
+#define CAPTURE_FRAMERATE 815
 #define PIPE_STDOUT
+
+double get_time_diff_us(struct timespec start, struct timespec end) {
+    return (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
+}
+struct timespec t1, t2, t3;
+
+static volatile int keepRunning = 1;
+
+void intHandler(int dummy)
+{
+    keepRunning = 0;
+}
 
 float sum_ts = 0.0;
 
 int main(int argc, char **argv)
 {
+    signal(SIGINT, intHandler);
+    signal(SIGPIPE, intHandler);
+    g_usleep(5e6);
     ArvCamera *camera;
     GError *error = NULL;
 
@@ -29,9 +45,13 @@ int main(int argc, char **argv)
 
         arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
 
-        if (error == NULL)
+        if (error == NULL) {
             /* Create the stream object without callback */
             stream = arv_camera_create_stream(camera, NULL, NULL, &error);
+        } else {
+            fprintf(stderr, "Error: could not create stream %s", error->message);
+            exit(EXIT_FAILURE);
+        }
 
         if (ARV_IS_STREAM(stream))
         {
@@ -51,18 +71,18 @@ int main(int argc, char **argv)
             }
 
             if (error == NULL)
-                /* Start the acquisition */
                 arv_camera_start_acquisition(camera, &error);
+
+            fprintf(stderr, "Start acquisition OK\n");
 
             if (error == NULL)
             {
-                guint64 last_ts = 0;
-                gchar *image_filename;
                 size_t image_size;
                 const gchar *image;
-                GError *image_write_error = NULL;
                 guint64 last_display_ts = 0;
-                for (i = 0; i < NUM_FRAMES; i++)
+                guint64 last_fps_ts = 0;
+                guint64 i = 0;
+                while (keepRunning)
                 {
                     ArvBuffer *buffer;
 
@@ -76,60 +96,70 @@ int main(int argc, char **argv)
                             break;
                         }
                         guint64 ts = arv_buffer_get_timestamp(buffer);
-                        if (i > 0)
-                        {
-                            sum_ts += (1.0 / (ts - last_ts) * 1e9);
-                            if (i % (NUM_FRAMES / 50) == 0)
-                                fprintf(stderr, "%d %ld\n", i, (guint64)(1.0 / (ts - last_ts) * 1e9));
+                        if (i % CAPTURE_FRAMERATE == 0) {
+                            if (last_fps_ts != 0) {
+                                // get elapsed time
+                                double delta_s = (ts - last_fps_ts) / 1e9;
+                                double real_fps = CAPTURE_FRAMERATE / delta_s;
+                                fprintf(stderr, "i:%lu fps:%.1f t:%.2f \n", i, real_fps, get_time_diff_us(t1, t2));
+                            }
+                            last_fps_ts = ts;
                         }
-                        last_ts = ts;
 
-                        image_filename = g_strdup_printf("images/%d.raw", i);
                         image = arv_buffer_get_image_data(buffer, &image_size);
 #ifdef PIPE_STDOUT
                         if (ts - last_display_ts >= (1e9 / DISPLAY_FRAMERATE))
                         {
-                            fwrite(image, 1, image_size, stdout);
+                            if (fwrite(image, 1, image_size, stdout) != image_size) {
+                                fprintf(stderr, "Error while writing to stdout\n");
+                                keepRunning = 0;
+                            }
+                            fflush(stdout);
+                            //fprintf(stderr, "img\n");
                             last_display_ts = ts;
                         }
+#ifdef SAVE_FRAMES
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+                        char image_filename[64];
+                        snprintf(image_filename, sizeof(image_filename), "images/%lu.raw", i);
+
+                        FILE *f = fopen(image_filename, "wb");
+                        if (f) {
+                            fwrite(image, 1, image_size, f);
+                            fclose(f);
+                        } else {
+                            fprintf(stderr, "Error: could not open %s\n", image_filename);
+                        }
+			clock_gettime(CLOCK_MONOTONIC, &t2);
+#endif
 #endif
                         arv_stream_push_buffer(stream, buffer);
-#ifdef SAVE_FRAMES
-                        g_file_set_contents(image_filename, image, image_size, &image_write_error);
-                        if (image_write_error != NULL)
-                        {
-                            fprintf(stderr, "Error while writing image: %s\n", image_write_error->message);
-                            break;
-                        }
-#endif
                     }
                     else
                     {
                         fprintf(stderr, "Error: NOT A BUFFER\n");
                     }
-                }
-                g_free(image_filename);
+                    i++;
+                }  // while
+            } else {
+                fprintf(stderr, "Error: could not start acquisition: %s", error->message);
             }
 
             if (error == NULL)
-                /* Stop the acquisition */
                 arv_camera_stop_acquisition(camera, &error);
 
-            /* Destroy the stream object */
             g_clear_object(&stream);
         }
 
-        /* Destroy the camera instance */
         g_clear_object(&camera);
     }
 
     if (error != NULL)
     {
-        /* En error happened, display the correspdonding message */
         fprintf(stderr, "Error: %s\n", error->message);
         return EXIT_FAILURE;
     }
 
-    fprintf(stderr, "avg framerate: %f\n", (sum_ts / (NUM_FRAMES - 1)));
+    fprintf(stderr, "exit\n");
     return EXIT_SUCCESS;
 }
