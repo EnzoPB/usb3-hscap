@@ -143,14 +143,20 @@ int main(int argc, char **argv)
 
         guint64 ts = arv_buffer_get_timestamp(buffer);
 
-        if (i % CAPTURE_FRAMERATE == 0) {
+        if (i % (CAPTURE_FRAMERATE/2) == 0) {
             if (last_fps_ts != 0) {
                 double delta_s = (ts - last_fps_ts) / 1e9;
                 double real_fps = CAPTURE_FRAMERATE / delta_s;
+                if (pipe_stdout) {
+                    fprintf(stderr, "\033[999;100H");
+                }
                 if (save_frames) {
-                    fprintf(stderr, "i:%lu fps:%.1f save_time:%.2fus\n", i, real_fps, get_time_diff_us(t1, t2));
+                    fprintf(stderr, "i:%lu fps:%.1f save_time:%.2fus\r", i, real_fps, get_time_diff_us(t1, t2));
                 } else {
-                    fprintf(stderr, "i:%lu fps:%.1f\n", i, real_fps);
+                    fprintf(stderr, "i:%lu fps:%.1f\r", i, real_fps);
+                }
+                if (pipe_stdout) {
+                    fflush(stderr);
                 }
             }
             last_fps_ts = ts;
