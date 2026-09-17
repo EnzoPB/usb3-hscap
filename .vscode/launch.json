@@ -1,0 +1,13 @@
+{
+    "configurations": [
+        {
+            "name": "Debug with Meson",
+            "type": "gdb",
+            "request": "launch",
+            "target": "./builddir/hscap",
+            "arguments": "--stdout",
+            "cwd": "${workspaceRoot}",
+            "preLaunchTask": "build debug meson"
+        }
+    ]
+}
