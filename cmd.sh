@@ -1,1 +1,11 @@
-./main | ffmpeg -pixel_format bayer_rggb8 -framerate 20 -f rawvideo -video_size 640x480 -i - -f v4l2 /dev/video2
+./builddir/hscap --stdout | ffmpeg \
+    -framerate 10 \
+    -video_size 512x512 \
+    -pixel_format bayer_bggr8 \
+    -f rawvideo \
+    -i - \
+    -c:v libx264 \
+    -g 20 \
+    -pix_fmt yuv420p \
+    -f mpegts \
+    udp://127.0.0.1:1234

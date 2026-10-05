@@ -8,10 +8,12 @@
 #include <sys/types.h>
 #include <string.h>
 #include <stdbool.h>
-#include <turbojpeg.h>
-#include <Simd/SimdLib.h>
+#include <glib.h>
 
-#define NUM_BUFFERS 100
+#include "write.h"
+#include "compressor.h"
+
+#define NUM_BUFFERS 1000
 #define DISPLAY_FRAMERATE 10
 #define CAPTURE_FRAMERATE 815
 
@@ -50,7 +52,6 @@ int main(int argc, char **argv)
     // Give some time for the system/camera to settle if needed
     g_usleep(3e6);
     
-    tjhandle tj_compressor = NULL;
     ArvCamera *camera;
     GError *error = NULL;
 
@@ -100,7 +101,7 @@ int main(int argc, char **argv)
 
     /* Insert buffers in the stream buffer pool */
     for (int i = 0; i < NUM_BUFFERS; i++) {
-        ArvBuffer *buf = arv_buffer_new(payload, NULL);
+        ArvBuffer *buf = arv_buffer_new_allocate(payload);
         arv_stream_push_buffer(stream, buf);
     }
 
@@ -110,24 +111,26 @@ int main(int argc, char **argv)
         goto cleanup_stream;
     }
 
-    fprintf(stderr, "Start acquisition OK\n");
+
+    gint width;
+    gint height;
+    arv_camera_get_region(camera, NULL, NULL, &width, &height, &error);
+    if (error != NULL) {
+        fprintf(stderr, "Error: could not get camera image size: %s\n", error->message);
+        goto cleanup_stream;
+    }
 
     if (save_frames) {
-        // Ensure the output directory exists
-        struct stat st = {0};
-        if (stat("images", &st) == -1) {
-            mkdir("images", 0700);
-        }
-        tj_compressor = tjInitCompress();
-        if (tj_compressor == NULL) {
-            fprintf(stderr, "Error initializing turbojpeg compressor\n");
-            goto cleanup_stream;
-        }
+        writer_init(width, height);
+        compressor_init(width, height);
     }
+
+    fprintf(stderr, "Start acquisition OK\n");
 
     guint64 last_display_ts = 0;
     guint64 last_fps_ts = 0;
-    guint64 i = 0;
+    guint64 frame_count = 0;
+    guint64 buffer_errors = 0;
 
     while (keepRunning) {
         ArvBuffer *buffer = arv_stream_pop_buffer(stream);
@@ -136,24 +139,26 @@ int main(int argc, char **argv)
         }
 
         if (arv_buffer_get_status(buffer) != ARV_BUFFER_STATUS_SUCCESS) {
-            fprintf(stderr, "Error: incomplete or corrupted buffer (frame %lu)\n", arv_buffer_get_frame_id(buffer));
+            buffer_errors++;
             arv_stream_push_buffer(stream, buffer);
+            if (buffer_errors % 100 == 0)
+                fprintf(stderr, "Error: incomplete or corrupted buffer (x%lu) (frame %lu)\n", buffer_errors, arv_buffer_get_frame_id(buffer));
             continue;
         }
 
         guint64 ts = arv_buffer_get_timestamp(buffer);
 
-        if (i % (CAPTURE_FRAMERATE/2) == 0) {
+        if (frame_count % (CAPTURE_FRAMERATE/2) == 0) {
             if (last_fps_ts != 0) {
                 double delta_s = (ts - last_fps_ts) / 1e9;
-                double real_fps = CAPTURE_FRAMERATE / delta_s;
+                double real_fps = CAPTURE_FRAMERATE / 2.0 / delta_s;
                 if (pipe_stdout) {
                     fprintf(stderr, "\033[999;100H");
                 }
                 if (save_frames) {
-                    fprintf(stderr, "i:%lu fps:%.1f save_time:%.2fus\r", i, real_fps, get_time_diff_us(t1, t2));
+                    fprintf(stderr, "i:%lu fps:%.1f compq=%d writeq=%d errors=%lu\r", frame_count, real_fps, g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free), buffer_errors);//get_time_diff_us(t1, t2));
                 } else {
-                    fprintf(stderr, "i:%lu fps:%.1f\r", i, real_fps);
+                    fprintf(stderr, "i:%lu fps:%.1f errors=%lu\r", frame_count, real_fps, buffer_errors);
                 }
                 if (pipe_stdout) {
                     fflush(stderr);
@@ -178,61 +183,21 @@ int main(int argc, char **argv)
 
         if (save_frames) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
-            
-            size_t width = arv_buffer_get_image_width(buffer);
-            size_t height = arv_buffer_get_image_height(buffer);
 
-            // convert to bgr, jpeg doesn't support bayer pixel format
-            // use SIMD to be fast (ka-chow)
-            unsigned char *bgr_buf = SimdAllocate(width * height * 3, 2);
+            jpeg_input_data *input_data = (jpeg_input_data *)g_async_queue_pop(jpeg_queue_free);
+            input_data->data_buffer = image;
+            input_data->buffer = buffer;
+            input_data->index = frame_count;
+            input_data->stream = stream;
+            g_async_queue_push(jpeg_queue, input_data);
 
-            if (bgr_buf != NULL) {
-                SimdBayerToBgr(
-                    (const unsigned char*)image,
-                    width, height,
-                    width,
-                    SimdPixelFormatBayerBggr,
-                    bgr_buf, width*3
-                );
-                
-                unsigned char *jpeg_buf = NULL;
-                unsigned long jpeg_size = 0;
-
-                if (tjCompress2(
-                    tj_compressor,
-                    bgr_buf,
-                    width, 0, height,
-                    TJPF_BGR,
-                    &jpeg_buf,
-                    &jpeg_size,
-                    TJSAMP_GRAY,
-                    90,
-                    TJFLAG_FASTDCT
-                ) == 0) {
-                    char image_filename[64];
-                    snprintf(image_filename, sizeof(image_filename), "images/%010lu.jpg", i);
-
-                    FILE *f = fopen(image_filename, "wb");
-                    if (f) {
-                        fwrite(jpeg_buf, 1, jpeg_size, f);
-                        fclose(f);
-                    } else {
-                        fprintf(stderr, "Error: could not open %s\n", image_filename);
-                    }
-                    tjFree(jpeg_buf);
-                } else {
-                    fprintf(stderr, "Error: turbojpeg compression failure: %s\n", tjGetErrorStr());
-                }
-            } else {
-                fprintf(stderr, "Error: could not allocate BGR buffer\n");
-            }
-            SimdFree(bgr_buf);
             
             clock_gettime(CLOCK_MONOTONIC, &t2);
+        } else {
+            // don't do that is saving frames, compressor will take care of that
+            arv_stream_push_buffer(stream, buffer);
         }
-
-        arv_stream_push_buffer(stream, buffer);
-        i++;
+        frame_count++;
     }
 
     arv_camera_stop_acquisition(camera, &error);
@@ -242,8 +207,9 @@ int main(int argc, char **argv)
     }
 
 cleanup_stream:
-    if (tj_compressor != NULL) {
-        tjDestroy(tj_compressor);
+    if (save_frames) {
+        writer_destroy();
+        compressor_destroy();
     }
     g_clear_object(&stream);
 cleanup_camera:

@@ -8,4 +8,10 @@ turbojpeg_dep = dependency('libturbojpeg')
 simd_dep = cc.find_library('Simd')
 math_dep = cc.find_library('m', required: true)
 
-exe = executable ('hscap', 'main.c', dependencies: [math_dep, aravis_dep, turbojpeg_dep, simd_dep], link_language: 'cpp')
+sources = files(
+    'main.c',
+    'write.c',
+    'compressor.c'
+)
+
+exe = executable ('hscap', sources, dependencies: [math_dep, aravis_dep, turbojpeg_dep, simd_dep], link_language: 'cpp')
