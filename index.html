@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HSCAP</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/marx-css@5/css/marx.min.css">
+    <script>
+        let last_recording_state;
+        let toggle_record_btn;
+        function update() {
+            fetch('/get_state')
+                .then(function(resp) { return resp.text() })
+                .then(function(data) {
+                    data = Object.fromEntries(data.split('\n').map(t => t.split('=')));
+                    document.getElementById('frame_index').innerText = data['frame_index'];
+                    document.getElementById('framerate').innerText = data['framerate'];
+                    document.getElementById('buffer_errors').innerText = data['buffer_errors'];
+                    document.getElementById('jpeg_queue_free').innerText = data['jpeg_queue_free'];
+                    document.getElementById('write_queue_free').innerText = data['write_queue_free'];
+                    document.getElementById('recording').innerText = data['recording'] == 1 ? 'Recording' : 'Not recording';
+                    if (data['recording'] != last_recording_state) {
+                        toggle_record_btn.disabled = false;
+                        if (data['recording'] == 1) {
+                            toggle_record_btn.innerText = 'Stop record';
+                            toggle_record_btn.style.background = '#e74c3c';
+                        } else {
+                            toggle_record_btn.innerText = 'Start record';
+                            toggle_record_btn.style.background = null;
+                        }
+                    }
+                    last_recording_state = data['recording'];
+                    setTimeout(update, 1000);
+                })
+                .catch(function(err) {
+                    document.getElementById('error').style.display = 'block';
+                    document.getElementById('error-msg').innerText = 'Failed to get data from server';
+                    throw err;
+                });
+        }
+        function toggle_record() {
+            document.getElementById('toggle-record-btn').disabled = true;
+            fetch('/toggle_record')
+                .catch(function(err) {
+                    document.getElementById('error').style.display = 'block';
+                    document.getElementById('error-msg').innerText = 'Failed to send command to server';
+                    throw err;
+                });
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            toggle_record_btn = document.getElementById('toggle-record-btn');
+            update();
+        });
+    </script>
+</head>
+<body>
+    <main>
+        <fieldset id="error" style="border-color:#ff4444;display:none">
+            <legend>Error</legend>
+            <div id="error-msg" style="margin-bottom:10px"></div>
+            <button onclick="update();document.getElementById('error').style.display='none'">Reload</button>
+        </fieldset>
+        <table>
+            <tr>
+                <td>Captured frame count</td>
+                <td id="frame_index">0</td>
+            </tr>
+            <tr>
+                <td>Capture framerate</td>
+                <td><span id="framerate">0</span> FPS</td>
+            </tr>
+            <tr>
+                <td>Capture buffer errors</td>
+                <td id="buffer_errors">0</td>
+            </tr>
+            <tr>
+                <td>Free buffers for compressor</td>
+                <td id="jpeg_queue_free">0</td>
+            </tr>
+            <tr>
+                <td>Free buffers for writer</td>
+                <td id="write_queue_free">0</td>
+            </tr>
+            <tr>
+                <td>Recording</td>
+                <td id="recording">0</td>
+            </tr>
+            <tr>
+                <td colspan="2">
+                    <button id="toggle-record-btn" style="width:100%" onclick="toggle_record()">Toggle record</button>
+                </td>
+            </tr>
+        </table>
+    </main>
+</body>
+</html>

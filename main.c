@@ -10,12 +10,20 @@
 #include <stdbool.h>
 #include <glib.h>
 
+#include "glibconfig.h"
+#include "state.h"
 #include "write.h"
 #include "compressor.h"
+#include "web_api.h"
 
 #define NUM_BUFFERS 1000
 #define DISPLAY_FRAMERATE 10
 #define CAPTURE_FRAMERATE 815
+
+guint64 frame_index = 0;
+gboolean recording = false;
+guint64 buffer_errors = 0;
+guint16 framerate = 0;
 
 double get_time_diff_us(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
@@ -31,17 +39,14 @@ void intHandler(int dummy)
 
 int main(int argc, char **argv)
 {
-    bool save_frames = false;
-    bool pipe_stdout = false;
+    bool enable_web_api = false;
 
     // Parse CLI arguments
     for (int j = 1; j < argc; j++) {
-        if (strcmp(argv[j], "--save") == 0) {
-            save_frames = true;
-        } else if (strcmp(argv[j], "--stdout") == 0) {
-            pipe_stdout = true;
+        if (strcmp(argv[j], "--web-api") == 0) {
+            enable_web_api = true;
         } else {
-            fprintf(stderr, "Usage: %s [--save] [--stdout]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--web-api]\n", argv[0]);
             return EXIT_FAILURE;
         }
     }
@@ -50,7 +55,16 @@ int main(int argc, char **argv)
     signal(SIGPIPE, intHandler);
     
     // Give some time for the system/camera to settle if needed
-    g_usleep(3e6);
+    g_usleep(1e6);
+
+    if (enable_web_api) {
+        if (web_api_init() != 0) {
+            fprintf(stderr, "Error: could not initialize web api server\n");
+            return EXIT_FAILURE;
+        } else {
+            fprintf(stderr, "Started web api server\n");
+        }
+    }
     
     ArvCamera *camera;
     GError *error = NULL;
@@ -111,7 +125,6 @@ int main(int argc, char **argv)
         goto cleanup_stream;
     }
 
-
     gint width;
     gint height;
     arv_camera_get_region(camera, NULL, NULL, &width, &height, &error);
@@ -120,17 +133,13 @@ int main(int argc, char **argv)
         goto cleanup_stream;
     }
 
-    if (save_frames) {
-        writer_init(width, height);
-        compressor_init(width, height);
-    }
+    writer_init(width, height);
+    compressor_init(width, height);
 
     fprintf(stderr, "Start acquisition OK\n");
 
     guint64 last_display_ts = 0;
     guint64 last_fps_ts = 0;
-    guint64 frame_count = 0;
-    guint64 buffer_errors = 0;
 
     while (keepRunning) {
         ArvBuffer *buffer = arv_stream_pop_buffer(stream);
@@ -148,21 +157,20 @@ int main(int argc, char **argv)
 
         guint64 ts = arv_buffer_get_timestamp(buffer);
 
-        if (frame_count % (CAPTURE_FRAMERATE/2) == 0) {
+        if (frame_index % (CAPTURE_FRAMERATE/2) == 0) {
             if (last_fps_ts != 0) {
                 double delta_s = (ts - last_fps_ts) / 1e9;
-                double real_fps = CAPTURE_FRAMERATE / 2.0 / delta_s;
-                if (pipe_stdout) {
-                    fprintf(stderr, "\033[999;100H");
-                }
-                if (save_frames) {
-                    fprintf(stderr, "i:%lu fps:%.1f compq=%d writeq=%d errors=%lu\r", frame_count, real_fps, g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free), buffer_errors);//get_time_diff_us(t1, t2));
+                framerate = CAPTURE_FRAMERATE / 2.0 / delta_s;
+                fprintf(stderr, "\033[999;100H");
+                if (recording) {
+                    fprintf(stderr, "i:%lu fps:%hu compq=%d writeq=%d errors=%lu\r",
+                    frame_index, framerate,
+                    g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free),
+                    buffer_errors);//get_time_diff_us(t1, t2));
                 } else {
-                    fprintf(stderr, "i:%lu fps:%.1f errors=%lu\r", frame_count, real_fps, buffer_errors);
+                    fprintf(stderr, "i:%lu fps:%hu errors=%lu\r", frame_index, framerate, buffer_errors);
                 }
-                if (pipe_stdout) {
-                    fflush(stderr);
-                }
+                fflush(stderr);
             }
             last_fps_ts = ts;
         }
@@ -170,24 +178,22 @@ int main(int argc, char **argv)
         size_t image_size;
         const gchar *image = arv_buffer_get_image_data(buffer, &image_size);
 
-        if (pipe_stdout) {
-            if (ts - last_display_ts >= (1e9 / DISPLAY_FRAMERATE)) {
-                if (fwrite(image, 1, image_size, stdout) != image_size) {
-                    fprintf(stderr, "Error while writing to stdout\n");
-                    keepRunning = 0;
-                }
-                fflush(stdout);
-                last_display_ts = ts;
+        if (ts - last_display_ts >= (1e9 / DISPLAY_FRAMERATE)) {
+            if (fwrite(image, 1, image_size, stdout) != image_size) {
+                fprintf(stderr, "Error while writing to stdout\n");
+                keepRunning = 0;
             }
+            fflush(stdout);
+            last_display_ts = ts;
         }
 
-        if (save_frames) {
+        if (recording) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
 
             jpeg_input_data *input_data = (jpeg_input_data *)g_async_queue_pop(jpeg_queue_free);
             input_data->data_buffer = image;
             input_data->buffer = buffer;
-            input_data->index = frame_count;
+            input_data->index = frame_index;
             input_data->stream = stream;
             g_async_queue_push(jpeg_queue, input_data);
 
@@ -197,7 +203,7 @@ int main(int argc, char **argv)
             // don't do that is saving frames, compressor will take care of that
             arv_stream_push_buffer(stream, buffer);
         }
-        frame_count++;
+        frame_index++;
     }
 
     arv_camera_stop_acquisition(camera, &error);
@@ -207,9 +213,10 @@ int main(int argc, char **argv)
     }
 
 cleanup_stream:
-    if (save_frames) {
-        writer_destroy();
-        compressor_destroy();
+    writer_destroy();
+    compressor_destroy();
+    if (enable_web_api) {
+        web_api_destroy();
     }
     g_clear_object(&stream);
 cleanup_camera:
