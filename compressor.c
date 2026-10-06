@@ -53,7 +53,7 @@ gpointer compressor_worker_func() {
   unsigned char *bgr_buf = NULL;
 
   while (jpeg_should_run) {
-    jpeg_input_data *input_data = (jpeg_input_data*)g_async_queue_try_pop(jpeg_queue);
+    jpeg_input_data *input_data = (jpeg_input_data*)g_async_queue_timeout_pop(jpeg_queue, 100000);
     if (input_data == NULL) {
       continue;
     }

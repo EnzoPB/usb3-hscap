@@ -34,7 +34,7 @@ void writer_destroy() {
 gpointer writer_worker_func() {
   while (write_should_run) {
     write_input_data *input_data =
-        (write_input_data *)g_async_queue_try_pop(write_queue);
+        (write_input_data *)g_async_queue_timeout_pop(write_queue, 100000);
     if (input_data == NULL) {
       continue;
     }
