@@ -27,11 +27,19 @@ enum MHD_Result ahc_echo(void *cls, struct MHD_Connection *connection,
     content = (gchar *)index_content;
   } else if (strcmp(url, "/get_state") == 0) {
     content = g_strdup_printf(
-      "frame_index=%lu\nframerate=%hu\nrecording=%d\nbuffer_errors=%lu\njpeg_queue_free=%d\nwrite_queue_free=%d",
-      frame_index, framerate, recording, buffer_errors,
-      g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free));
+      "frame_index=%lu\n"
+      "framerate=%hu\n"
+      "buffer_errors=%lu\n"
+      "jpeg_queue_free=%d\n"
+      "write_queue_free=%d\n"
+      "recording=%d\n"
+      "recorded_frames=%lu\n"
+      "record_folder=%s\n",
+      frame_index, framerate, buffer_errors,
+      g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free),
+      recording, recording ? frame_index - record_start_frame_index : 0, recording ? record_folder : "");
   } else if (strcmp(url, "/toggle_record") == 0) {
-    recording = !recording;
+    should_record = !should_record;
     content = "ok";
   } else {
     content = "404 not found\n";

@@ -6,6 +6,7 @@
     <title>HSCAP</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/marx-css@5/css/marx.min.css">
     <script>
+        const $ = document.querySelector.bind(document);
         let last_recording_state;
         let toggle_record_btn;
         function update() {
@@ -13,12 +14,14 @@
                 .then(function(resp) { return resp.text() })
                 .then(function(data) {
                     data = Object.fromEntries(data.split('\n').map(t => t.split('=')));
-                    document.getElementById('frame_index').innerText = data['frame_index'];
-                    document.getElementById('framerate').innerText = data['framerate'];
-                    document.getElementById('buffer_errors').innerText = data['buffer_errors'];
-                    document.getElementById('jpeg_queue_free').innerText = data['jpeg_queue_free'];
-                    document.getElementById('write_queue_free').innerText = data['write_queue_free'];
-                    document.getElementById('recording').innerText = data['recording'] == 1 ? 'Recording' : 'Not recording';
+                    $('#frame_index').innerText = data['frame_index'];
+                    $('#framerate').innerText = data['framerate'];
+                    $('#buffer_errors').innerText = data['buffer_errors'];
+                    $('#jpeg_queue_free').innerText = data['jpeg_queue_free'];
+                    $('#write_queue_free').innerText = data['write_queue_free'];
+                    $('#recording').innerText = data['recording'] == 1 ? 'Recording' : 'Not recording';
+                    $('#recorded_frames').innerText = data['recorded_frames'];
+                    $('#record_folder').innerText = data['record_folder'];
                     if (data['recording'] != last_recording_state) {
                         toggle_record_btn.disabled = false;
                         if (data['recording'] == 1) {
@@ -33,22 +36,22 @@
                     setTimeout(update, 1000);
                 })
                 .catch(function(err) {
-                    document.getElementById('error').style.display = 'block';
-                    document.getElementById('error-msg').innerText = 'Failed to get data from server';
+                    $('#error').style.display = 'block';
+                    $('#error-msg').innerText = 'Failed to get data from server';
                     throw err;
                 });
         }
         function toggle_record() {
-            document.getElementById('toggle-record-btn').disabled = true;
+            $('#toggle-record-btn').disabled = true;
             fetch('/toggle_record')
                 .catch(function(err) {
-                    document.getElementById('error').style.display = 'block';
-                    document.getElementById('error-msg').innerText = 'Failed to send command to server';
+                    $('#error').style.display = 'block';
+                    $('#error-msg').innerText = 'Failed to send command to server';
                     throw err;
                 });
         }
         document.addEventListener('DOMContentLoaded', function() {
-            toggle_record_btn = document.getElementById('toggle-record-btn');
+            toggle_record_btn = $('#toggle-record-btn');
             update();
         });
     </script>
@@ -83,7 +86,15 @@
             </tr>
             <tr>
                 <td>Recording</td>
-                <td id="recording">0</td>
+                <td id="recording"></td>
+            </tr>
+            <tr>
+                <td>Recorded frames count</td>
+                <td id="recorded_frames"></td>
+            </tr>
+            <tr>
+                <td>Record folder</td>
+                <td id="record_folder"></td>
             </tr>
             <tr>
                 <td colspan="2">

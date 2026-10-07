@@ -21,14 +21,14 @@
 #define CAPTURE_FRAMERATE 815
 
 guint64 frame_index = 0;
-gboolean recording = false;
 guint64 buffer_errors = 0;
 guint16 framerate = 0;
 
-double get_time_diff_us(struct timespec start, struct timespec end) {
-    return (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
-}
-struct timespec t1 = {0}, t2 = {0};
+gboolean recording = false;
+gboolean should_record = false;
+GDateTime* record_start_time = NULL;
+guint64 record_start_frame_index = 0;
+gchar* record_folder;
 
 static volatile int keepRunning = 1;
 
@@ -141,11 +141,12 @@ int main(int argc, char **argv)
     guint64 last_display_ts = 0;
     guint64 last_fps_ts = 0;
 
+    ArvBuffer *buffer;
+
     while (keepRunning) {
-        ArvBuffer *buffer = arv_stream_pop_buffer(stream);
-        if (!ARV_IS_BUFFER(buffer)) {
-            continue;
-        }
+        do {
+            buffer = arv_stream_try_pop_buffer(stream);
+        } while (buffer == NULL || !ARV_IS_BUFFER(buffer));
 
         if (arv_buffer_get_status(buffer) != ARV_BUFFER_STATUS_SUCCESS) {
             buffer_errors++;
@@ -155,7 +156,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        guint64 ts = arv_buffer_get_timestamp(buffer);
+        guint64 ts = arv_buffer_get_system_timestamp(buffer);
 
         if (frame_index % (CAPTURE_FRAMERATE/2) == 0) {
             if (last_fps_ts != 0) {
@@ -166,7 +167,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "i:%lu fps:%hu compq=%d writeq=%d errors=%lu\r",
                     frame_index, framerate,
                     g_async_queue_length(jpeg_queue_free), g_async_queue_length(write_queue_free),
-                    buffer_errors);//get_time_diff_us(t1, t2));
+                    buffer_errors);
                 } else {
                     fprintf(stderr, "i:%lu fps:%hu errors=%lu\r", frame_index, framerate, buffer_errors);
                 }
@@ -187,18 +188,37 @@ int main(int argc, char **argv)
             last_display_ts = ts;
         }
 
-        if (recording) {
-            clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (!recording && should_record) {  // start record
+            record_start_time = g_date_time_new_now_local();
+            record_start_frame_index = frame_index;
+            record_folder = g_date_time_format(record_start_time, "recordings/%d-%m-%Y_%H-%M-%S");
+            if (g_mkdir_with_parents(record_folder, 0700) != 0) {
+                fprintf(stderr, "Error: could not create recording directory %s\n", record_folder);
+                should_record = false;
+            } else {
+                recording = true;
+                fprintf(stderr, "Started recording in folder %s\n", record_folder);
+            }
+        }
 
+        if (
+            recording && !should_record &&
+            g_async_queue_length(jpeg_queue) <= 0 && g_async_queue_length(write_queue) <= 0
+        ) {  // record stopped, all files are written
+            fprintf(stderr, "Stopped recording %s\n", record_folder);
+            recording = false;
+            record_folder = "";
+            record_start_time = NULL;
+            record_start_frame_index = 0;
+        }
+
+        if (recording && should_record) {
             jpeg_input_data *input_data = (jpeg_input_data *)g_async_queue_pop(jpeg_queue_free);
             input_data->data_buffer = image;
             input_data->buffer = buffer;
             input_data->index = frame_index;
             input_data->stream = stream;
             g_async_queue_push(jpeg_queue, input_data);
-
-            
-            clock_gettime(CLOCK_MONOTONIC, &t2);
         } else {
             // don't do that is saving frames, compressor will take care of that
             arv_stream_push_buffer(stream, buffer);

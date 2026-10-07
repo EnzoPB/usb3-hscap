@@ -1,4 +1,6 @@
 #include "write.h"
+#include "glib.h"
+#include "state.h"
 
 GAsyncQueue *write_queue_free;
 GAsyncQueue *write_queue;
@@ -32,6 +34,7 @@ void writer_destroy() {
 }
 
 gpointer writer_worker_func() {
+  char image_filename[64];
   while (write_should_run) {
     write_input_data *input_data =
         (write_input_data *)g_async_queue_timeout_pop(write_queue, 100000);
@@ -39,9 +42,9 @@ gpointer writer_worker_func() {
       continue;
     }
 
-    char image_filename[64];
-    snprintf(image_filename, sizeof(image_filename), "images/%010lu.jpg",
-             input_data->index);
+    snprintf(
+      image_filename, sizeof(image_filename), "%s/%010lu.jpg",
+      record_folder, input_data->index - record_start_frame_index);
 
     FILE *f = fopen(image_filename, "wb");
     if (f) {
@@ -50,7 +53,6 @@ gpointer writer_worker_func() {
     } else {
       fprintf(stderr, "Error: could not open %s\n", image_filename);
     }
-    //tjFree(input_data->data);
 
     // done, push it back to the free queue
     g_async_queue_push(write_queue_free, input_data);
