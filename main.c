@@ -18,7 +18,7 @@
 
 #define NUM_BUFFERS 1000
 #define DISPLAY_FRAMERATE 10
-#define CAPTURE_FRAMERATE 815
+#define RECORD_FRAMERATE 815
 
 guint64 frame_index = 0;
 guint64 buffer_errors = 0;
@@ -35,6 +35,17 @@ static volatile int keepRunning = 1;
 void intHandler(int dummy)
 {
     keepRunning = 0;
+}
+
+int set_framerate(ArvCamera* camera, gint target_framerate) {
+    GError* error = NULL;
+    arv_camera_set_frame_rate(camera, target_framerate, &error);
+    if (error != NULL) {
+        fprintf(stderr, "Error: failed to set framerate: %s\n", error->message);
+        g_error_free(error);
+        return 1;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -79,11 +90,7 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "Connected to %s\n", arv_camera_get_model_name(camera, NULL));
 
-    arv_camera_set_frame_rate(camera, CAPTURE_FRAMERATE, &error);
-    if (error != NULL) {
-        fprintf(stderr, "Error: failed to set framerate: %s\n", error->message);
-        g_clear_error(&error);
-    }
+    set_framerate(camera, DISPLAY_FRAMERATE);
 
     arv_camera_set_pixel_format(camera, ARV_PIXEL_FORMAT_BAYER_BG_8, &error);
     if (error != NULL) {
@@ -140,6 +147,7 @@ int main(int argc, char **argv)
 
     guint64 last_display_ts = 0;
     guint64 last_fps_ts = 0;
+    guint64 last_fps_frame_index = 0;
 
     ArvBuffer *buffer;
 
@@ -158,10 +166,10 @@ int main(int argc, char **argv)
 
         guint64 ts = arv_buffer_get_system_timestamp(buffer);
 
-        if (frame_index % (CAPTURE_FRAMERATE/2) == 0) {
+        if (ts - last_fps_ts > 1e9) {  // calculate fps & display infos every sec
             if (last_fps_ts != 0) {
                 double delta_s = (ts - last_fps_ts) / 1e9;
-                framerate = CAPTURE_FRAMERATE / 2.0 / delta_s;
+                framerate = (frame_index - last_fps_frame_index) / delta_s;
                 fprintf(stderr, "\033[999;100H");
                 if (recording) {
                     fprintf(stderr, "i:%lu fps:%hu compq=%d writeq=%d errors=%lu\r",
@@ -174,6 +182,7 @@ int main(int argc, char **argv)
                 fflush(stderr);
             }
             last_fps_ts = ts;
+            last_fps_frame_index = frame_index;
         }
 
         size_t image_size;
@@ -188,7 +197,10 @@ int main(int argc, char **argv)
             last_display_ts = ts;
         }
 
-        if (!recording && should_record) {  // start record
+        if (!recording && should_record) {  // not recording, should be recording, so start recording
+            if (set_framerate(camera, RECORD_FRAMERATE) != 0) {
+                should_record = false;
+            } else {
             record_start_time = g_date_time_new_now_local();
             record_start_frame_index = frame_index;
             record_folder = g_date_time_format(record_start_time, "recordings/%d-%m-%Y_%H-%M-%S");
@@ -198,6 +210,7 @@ int main(int argc, char **argv)
             } else {
                 recording = true;
                 fprintf(stderr, "Started recording in folder %s\n", record_folder);
+                }
             }
         }
 
@@ -210,6 +223,7 @@ int main(int argc, char **argv)
             record_folder = "";
             record_start_time = NULL;
             record_start_frame_index = 0;
+            set_framerate(camera, DISPLAY_FRAMERATE);
         }
 
         if (recording && should_record) {
