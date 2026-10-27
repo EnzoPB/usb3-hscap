@@ -15,6 +15,25 @@
 #include "write.h"
 #include "compressor.h"
 #include "web_api.h"
+#include "stream.h"
+
+typedef struct {
+    gint16 framerate;
+    gint32 exposure;
+    gint16 brightness;
+} camera_preset;
+
+const camera_preset record_preset = {
+    .framerate = 815,
+    .exposure = 1125,
+    .brightness = 100
+};
+
+const camera_preset display_preset = {
+    .framerate = 20,
+    .exposure = 35000,
+    .brightness = 100
+};
 
 #define NUM_BUFFERS 1000
 #define DISPLAY_FRAMERATE 10
@@ -37,44 +56,47 @@ void intHandler(int dummy)
     keepRunning = 0;
 }
 
-int set_framerate(ArvCamera* camera, gint target_framerate) {
+int set_camera_preset(ArvCamera* camera, const camera_preset* preset, gboolean ignore_error) {
     GError* error = NULL;
-    arv_camera_set_frame_rate(camera, target_framerate, &error);
+    arv_camera_set_frame_rate(camera, preset->framerate, &error);
     if (error != NULL) {
         fprintf(stderr, "Error: failed to set framerate: %s\n", error->message);
         g_error_free(error);
-        return 1;
+        if (!ignore_error)
+            return 1;
+    }
+
+    arv_camera_set_exposure_time(camera, preset->exposure, &error);
+    if (error != NULL) {
+        fprintf(stderr, "Error: failed to set exposure: %s\n", error->message);
+        g_error_free(error);
+        if (!ignore_error)
+            return 1;
+    }
+
+    arv_camera_set_integer(camera, "Brightness", preset->brightness, &error);
+    if (error != NULL) {
+        fprintf(stderr, "Error: failed to set brightness: %s\n", error->message);
+        g_error_free(error);
+        if (!ignore_error)
+            return 1;
     }
     return 0;
 }
 
 int main(int argc, char **argv)
 {
-    bool enable_web_api = false;
-
-    // Parse CLI arguments
-    for (int j = 1; j < argc; j++) {
-        if (strcmp(argv[j], "--web-api") == 0) {
-            enable_web_api = true;
-        } else {
-            fprintf(stderr, "Usage: %s [--web-api]\n", argv[0]);
-            return EXIT_FAILURE;
-        }
-    }
-
     signal(SIGINT, intHandler);
     signal(SIGPIPE, intHandler);
     
     // Give some time for the system/camera to settle if needed
     g_usleep(1e6);
 
-    if (enable_web_api) {
-        if (web_api_init() != 0) {
-            fprintf(stderr, "Error: could not initialize web api server\n");
-            return EXIT_FAILURE;
-        } else {
-            fprintf(stderr, "Started web api server\n");
-        }
+    if (web_api_init() != 0) {
+        fprintf(stderr, "Error: could not initialize web api server\n");
+        return EXIT_FAILURE;
+    } else {
+        fprintf(stderr, "Started web api server\n");
     }
     
     ArvCamera *camera;
@@ -90,9 +112,9 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "Connected to %s\n", arv_camera_get_model_name(camera, NULL));
 
-    set_framerate(camera, DISPLAY_FRAMERATE);
+    set_camera_preset(camera, &display_preset, true);
 
-    arv_camera_set_pixel_format(camera, ARV_PIXEL_FORMAT_BAYER_BG_8, &error);
+    arv_camera_set_pixel_format(camera, ARV_PIXEL_FORMAT_BAYER_RG_8, &error);
     if (error != NULL) {
         fprintf(stderr, "Error: failed to set pixel format: %s\n", error->message);
         g_clear_error(&error);
@@ -142,10 +164,13 @@ int main(int argc, char **argv)
 
     writer_init(width, height);
     compressor_init(width, height);
+    if (stream_init(width, height) != 0) {
+        fprintf(stderr, "Error: failed to init stream\n");
+        goto cleanup_stream;
+    }
 
     fprintf(stderr, "Start acquisition OK\n");
 
-    guint64 last_display_ts = 0;
     guint64 last_fps_ts = 0;
     guint64 last_fps_frame_index = 0;
 
@@ -170,7 +195,7 @@ int main(int argc, char **argv)
             if (last_fps_ts != 0) {
                 double delta_s = (ts - last_fps_ts) / 1e9;
                 framerate = (frame_index - last_fps_frame_index) / delta_s;
-                fprintf(stderr, "\033[999;100H");
+                //fprintf(stderr, "\033[999;100H");
                 if (recording) {
                     fprintf(stderr, "i:%lu fps:%hu compq=%d writeq=%d errors=%lu\r",
                     frame_index, framerate,
@@ -188,55 +213,49 @@ int main(int argc, char **argv)
         size_t image_size;
         const gchar *image = arv_buffer_get_image_data(buffer, &image_size);
 
-        if (ts - last_display_ts >= (1e9 / DISPLAY_FRAMERATE)) {
+        /*if (ts - last_display_ts >= (1e9 / DISPLAY_FRAMERATE)) {
             if (fwrite(image, 1, image_size, stdout) != image_size) {
                 fprintf(stderr, "Error while writing to stdout\n");
                 keepRunning = 0;
             }
             fflush(stdout);
             last_display_ts = ts;
-        }
+        }*/
 
         if (!recording && should_record) {  // not recording, should be recording, so start recording
-            if (set_framerate(camera, RECORD_FRAMERATE) != 0) {
+            if (set_camera_preset(camera, &record_preset, false) != 0) {
                 should_record = false;
+                set_camera_preset(camera, &record_preset, true);
             } else {
-            record_start_time = g_date_time_new_now_local();
-            record_start_frame_index = frame_index;
-            record_folder = g_date_time_format(record_start_time, "recordings/%d-%m-%Y_%H-%M-%S");
-            if (g_mkdir_with_parents(record_folder, 0700) != 0) {
-                fprintf(stderr, "Error: could not create recording directory %s\n", record_folder);
-                should_record = false;
-            } else {
-                recording = true;
-                fprintf(stderr, "Started recording in folder %s\n", record_folder);
+                record_start_time = g_date_time_new_now_local();
+                record_start_frame_index = frame_index;
+                record_folder = g_date_time_format(record_start_time, "recordings/%d-%m-%Y_%H-%M-%S");
+                if (g_mkdir_with_parents(record_folder, 0700) != 0) {
+                    fprintf(stderr, "Error: could not create recording directory %s\n", record_folder);
+                    should_record = false;
+                } else {
+                    recording = true;
+                    fprintf(stderr, "Started recording in folder %s\n", record_folder);
                 }
             }
         }
 
-        if (
-            recording && !should_record &&
-            g_async_queue_length(jpeg_queue) <= 0 && g_async_queue_length(write_queue) <= 0
-        ) {  // record stopped, all files are written
+        if (recording && !should_record && g_async_queue_length(write_queue) <= 0) {  // record done, all files are written
             fprintf(stderr, "Stopped recording %s\n", record_folder);
             recording = false;
-            record_folder = "";
+            record_folder = NULL;
             record_start_time = NULL;
             record_start_frame_index = 0;
-            set_framerate(camera, DISPLAY_FRAMERATE);
+            set_camera_preset(camera, &display_preset, true);
         }
+        
+        jpeg_input_data *input_data = (jpeg_input_data *)g_async_queue_pop(jpeg_queue_free);
+        input_data->data_buffer = image;
+        input_data->buffer = buffer;
+        input_data->index = frame_index;
+        input_data->stream = stream;
+        g_async_queue_push(jpeg_queue, input_data);
 
-        if (recording && should_record) {
-            jpeg_input_data *input_data = (jpeg_input_data *)g_async_queue_pop(jpeg_queue_free);
-            input_data->data_buffer = image;
-            input_data->buffer = buffer;
-            input_data->index = frame_index;
-            input_data->stream = stream;
-            g_async_queue_push(jpeg_queue, input_data);
-        } else {
-            // don't do that is saving frames, compressor will take care of that
-            arv_stream_push_buffer(stream, buffer);
-        }
         frame_index++;
     }
 
@@ -247,11 +266,10 @@ int main(int argc, char **argv)
     }
 
 cleanup_stream:
+    stream_destroy();
     writer_destroy();
     compressor_destroy();
-    if (enable_web_api) {
-        web_api_destroy();
-    }
+    web_api_destroy();
     g_clear_object(&stream);
 cleanup_camera:
     g_clear_object(&camera);

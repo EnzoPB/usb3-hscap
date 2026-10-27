@@ -1,5 +1,7 @@
 #include "compressor.h"
 #include "glib.h"
+#include "state.h"
+#include "stream.h"
 #include <turbojpeg.h>
 
 GAsyncQueue* jpeg_queue_free;  // queue of free buffers
@@ -50,7 +52,11 @@ gpointer compressor_worker_func() {
 
   // convert to bgr, jpeg doesn't support bayer pixel format
   // use SIMD to be fast (ka-chow)
-  unsigned char *bgr_buf = NULL;
+  unsigned char *bgr_buf = SimdAllocate(image_width * image_height * 3, 2);
+  if (bgr_buf == NULL) {
+    fprintf(stderr, "Error: could not allocate SIMD buffer on thread %s\n", g_thread_get_name(g_thread_self()));
+    return NULL;
+  }
 
   while (jpeg_should_run) {
     jpeg_input_data *input_data = (jpeg_input_data*)g_async_queue_timeout_pop(jpeg_queue, 100000);
@@ -58,19 +64,13 @@ gpointer compressor_worker_func() {
       continue;
     }
 
-    if (bgr_buf == NULL) {  // allocate the buffer if it is not
-      bgr_buf = SimdAllocate(image_width * image_height * 3, 2);
-      if (bgr_buf == NULL) {
-        fprintf(stderr, "Error: could not allocate SIMD buffer on thread %s\n", g_thread_get_name(g_thread_self()));
-        return NULL;
-      }
-    }
     SimdBayerToBgr((const unsigned char *)input_data->data_buffer, image_width, image_height, image_width,
                    SimdPixelFormatBayerBggr, bgr_buf, image_width * 3);
 
+    // take a write buffer from the free queue
     write_input_data *output_data = (write_input_data *)g_async_queue_pop(write_queue_free);
     output_data->index = input_data->index;
-    output_data->size = write_buffer_capacity;
+    output_data->size = write_buffer_capacity;  // max jpeg size
 
     if (tjCompress2(
       jpeg_compressor,
@@ -78,26 +78,37 @@ gpointer compressor_worker_func() {
       image_width,
       0,
       image_height,
-      TJPF_BGR,
+      TJPF_RGB,
       &output_data->data_buffer,
       &output_data->size,
-      TJSAMP_444,
+      TJSAMP_420,
       90,
       TJFLAG_FASTDCT) == 0) {
-        // we don't need the aravis buffer anymore, push it back
-        arv_stream_push_buffer(input_data->stream, input_data->buffer);
-
-        // done, push it back to the free queue and push it to the write queue
-        g_async_queue_push(jpeg_queue_free, input_data);
+      if (recording && should_record) {
+        // done, send the data to the writer
         g_async_queue_push(write_queue, output_data);
-      //tjFree(jpeg_buf);
+      } else {
+        // done, but not recording so send the data back to the free queue
+        
+        if (g_async_queue_length(stream_queue_free) > 0) {
+          stream_input_data* b = g_async_queue_pop(stream_queue_free);
+          b->size = output_data->size;
+          b->index = output_data->index;
+          memcpy(b->buffer, output_data->data_buffer, b->size);
+          g_async_queue_push(stream_queue, b);
+        }
+
+        g_async_queue_push(write_queue_free, output_data);
+      }
     } else {
       fprintf(stderr, "Error: turbojpeg compression failure: %s\n",
               tjGetErrorStr());
-      arv_stream_push_buffer(input_data->stream, input_data->buffer);
+      // send the buffer back to the writer free queue
       g_async_queue_push(write_queue_free, output_data);
-      g_async_queue_push(jpeg_queue_free, input_data);
     }
+    // we don't need the aravis & jpeg buffer anymore, push them back
+    arv_stream_push_buffer(input_data->stream, input_data->buffer);
+    g_async_queue_push(jpeg_queue_free, input_data);
   }
   SimdFree(bgr_buf);
   tjDestroy(jpeg_compressor);

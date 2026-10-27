@@ -44,6 +44,14 @@
         function toggle_record() {
             $('#toggle-record-btn').disabled = true;
             fetch('/toggle_record')
+                .then(function (resp) {
+                    if (!resp.ok) {
+                        resp.text().then(text => {
+                            $('#error').style.display = 'block';
+                            $('#error-msg').innerText = 'Server returned an error: ' + text;
+                        })
+                    }
+                })
                 .catch(function(err) {
                     $('#error').style.display = 'block';
                     $('#error-msg').innerText = 'Failed to send command to server';

@@ -8,7 +8,7 @@
 #include <Simd/SimdLib.h>
 #include "write.h"
 
-#define NUM_JPEG_WORKERS 1
+#define NUM_JPEG_WORKERS 5
 #define JPEG_QUEUE_LENGTH 1000
 
 extern GAsyncQueue* jpeg_queue_free;  // queue of free buffers
